@@ -10,7 +10,7 @@ for k in range(4):
             f"test{k}", address="amqp://guest:guest@localhost", exchangeName="test"
         )
     )
-time.sleep(1)
+
 # Run getQueueSize in a loop and meassure time
 for j in range(36000):
     timeout = False
@@ -18,7 +18,7 @@ for j in range(36000):
         start = time.time()
         size = c.getQueueSize()
         dur = time.time() - start
-        print(f"getQueueSize took {dur} for queue {c.queue_}")
+        print(f"getQueueSize took {dur} for queue {c._queue}")
         if dur > 10:
             print(
                 "Test failed. getQueueSize took more than 10 seconds. This will cause the script to block as we cannot close consumers"
@@ -26,11 +26,9 @@ for j in range(36000):
             timeout = True
     if timeout:
         break
-time.sleep(1)
+
 # Stop consumers and wait for them to shutdown cleanly
 for c in cons:
     c.shutdown()
-for c in cons:
-    while not c.finished_:
-        time.sleep(0.1)
+
 print(f"finished")

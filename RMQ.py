@@ -22,7 +22,7 @@ class RMQ(threading.Thread):
         routing_key: str = "",
         address: str = "",
         on_message: callable = None,
-        on_queue_bind: callable = None,
+        on_queue_bind: callable = None
     ):
         threading.Thread.__init__(self)
         self._connection = None
@@ -42,6 +42,8 @@ class RMQ(threading.Thread):
         self._routing_key = routing_key
         self._finished = False
         self._reconnect_delay_s = 5
+        self._connected_queue = Queue()
+        self._shutdown_queue = Queue()
 
     def on_message_pass(
         self,
@@ -89,6 +91,8 @@ class RMQ(threading.Thread):
 
     def on_queue_bind(self, unused_frame: frame.Method):
         print("Queue {} bound to exchange {}".format(self._queue, self._exchange))
+        self._connected_queue.put(None)
+        self._connected_queue.task_done()
         self._is_connected = True
 
     def on_channel_closed(self, channel: channel.Channel, exception: Exception):
@@ -113,6 +117,8 @@ class RMQ(threading.Thread):
             print("Reopening connection in {} seconds".format(self._reconnect_delay_s))
         else:
             print(f"RMQ shutdown - connection closed for queue {self._queue}")
+            self._shutdown_queue.put(None)
+            self._shutdown_queue.task_done()
         self._connection.ioloop.stop()
 
     def getQueueName(self) -> str:
@@ -127,6 +133,12 @@ class RMQ(threading.Thread):
         if self._connection is not None:
             print("Closing connection")
             self._connection.close()
+            try:
+                self._shutdown_queue.get(timeout=10)
+                self._shutdown_queue.join()
+            except Exception as e:
+                print(f"Exception while waiting for shutdown {e}")
+        
 
     def connect(self):
         parameters = URLParameters(self._address)
@@ -144,15 +156,16 @@ class RMQ(threading.Thread):
         self._connection.ioloop.stop()
 
     def wait_for_connection(self):
-        while not self._is_connected:
-            time.sleep(0.1)
+        try:
+            self._connected_queue.get(timeout=10)
+            self._connected_queue.join()
+        except Exception as e:
+            print(f"Exception occured while waiting for wait_for_connection {e}")
 
     def run(self):
         self._finished = False
         while not self._shutdown:
             self.connect()
-            if not self._shutdown:
-                time.sleep(self._reconnect_delay_s)
         self._finished = True
         print("Stopped")
 
@@ -171,16 +184,16 @@ class RMQConsumer(RMQ):
             exchangeName=exchangeName,
             routing_key=routing_key,
             address=address,
-            on_message=on_message,
+            on_message=on_message
         )
         self.start()
         self.wait_for_connection()
         self.queue_size_ = -1
 
-    def on_queue_size(self, event: threading.Event, method_frame: frame.Method):
+    def on_queue_size(self, queue_notify : Queue, method_frame : frame.Method):
         self.queue_size_ = method_frame.method.message_count
-        event.set()
-        print(f"on_queue_size for queue {self._queue}")
+        queue_notify.put(None)
+        queue_notify.task_done()
 
     def on_queue_delete(self, event: threading.Event, method_frame: frame.Method):
         if method_frame.method.NAME == "Queue.DeleteOk":
@@ -188,16 +201,21 @@ class RMQConsumer(RMQ):
         else:
             print("Failed to delete queue {}".format(self._queue))
 
-    def getQueueSize(self, timeout: int = 10) -> int:
+    def getQueueSize(self, timeout : int = 10 ) -> int:
         self.queue_size_ = -1
         if not self._is_connected or self._channel is None:
             return self.queue_size_
-        event = threading.Event()
-        queue_size_event_callback = functools.partial(self.on_queue_size, event)
+        queue_notify = Queue()
+        queue_size_event_callback = functools.partial(self.on_queue_size, queue_notify)
         self._channel.queue_declare(
-            queue=self._queue, callback=queue_size_event_callback, durable=True
-        )
-        event.wait(timeout)
+            queue=self._queue,
+            callback=queue_size_event_callback,
+            durable=True)
+        try:
+            queue_notify.get(timeout=timeout)
+            queue_notify.join()
+        except Exception as e:
+            print(f"Exception occured while waiting for queue_declare callback {e}")
         return self.queue_size_
 
     def deleteQueue(self, timeout: int = 10):
